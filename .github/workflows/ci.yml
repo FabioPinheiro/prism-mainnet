@@ -1,0 +1,66 @@
+name: PRISM Indexer
+run-name: PRISM Indexer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *" # Every 30 minutes
+
+concurrency: # There can be at most one running and one pending job in a concurrency group at any time.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# CARDANO_PRISM_VERSION is sourced from a GitHub Actions repo/org variable
+# (Settings -> Secrets and variables -> Actions -> Variables -> CARDANO_PRISM_VERSION).
+# If the variable is unset, falls back to the default below.
+env:
+  CARDANO_PRISM_VERSION: ${{ vars.CARDANO_PRISM_VERSION || '0.1.0-M48' }}
+  # Silence reactivemongo/akka dead-letter spam at JVM startup.
+  JAVA_TOOL_OPTIONS: "-Dakka.log-dead-letters=0 -Dakka.log-dead-letters-during-shutdown=off"
+
+jobs:
+  indexer-job:
+    name: Indexer job
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # Reusable command prefix for the PRISM CLI. Append the subcommand args after `--`.
+      # org.slf4j:slf4j-nop:2.0.13 is to remove some warnings
+      # 
+      CARDANO_PRISM_CLI: cs launch app.fmgp::cardano-prism-cli:${{ vars.CARDANO_PRISM_VERSION || '0.1.0-M48' }} org.slf4j:slf4j-nop:2.0.13 -M fmgp.did.method.prism.cli.PrismCli --
+    steps:
+      - name: Log cardano-prism-cli version
+        run: |
+          echo "Using cardano-prism-cli version $CARDANO_PRISM_VERSION"
+          echo "$CARDANO_PRISM_CLI"
+
+      - uses: actions/cache@v4
+        with:
+          path: . # this will replace the folder '.git' and the AUTHORIZATION token (for job)
+          key: cache-git
+
+      - uses: actions/checkout@v4
+
+      - uses: coursier/cache-action@v6
+      - uses: coursier/setup-action@v1
+
+      - name: Coursier Run Indexer (update MongoDB)
+        run: $CARDANO_PRISM_CLI indexer mongodb --token ${{ secrets.BLOCKFROST_APIKEY }} ${{ secrets.MONGODB_SRV }}
+
+      - name: Coursier Run Indexer (export refs from MongoDB)
+        run: $CARDANO_PRISM_CLI indexer export ${{ secrets.MONGODB_SRV }} ./refs
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        id: auto-commit-action
+        with:
+          commit_message: Indexer job
+          file_pattern: "refs/**"
+
+      - name: Check for changes detected
+        if: steps.auto-commit-action.outputs.changes_detected == 'true'
+        run: echo "Changes!"
+
+      - name: Check for no changes detected
+        if: steps.auto-commit-action.outputs.changes_detected == 'false'
+        run: echo "No Changes!"
